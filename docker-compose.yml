@@ -1,0 +1,347 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # TinyURL应用服务
+  tinyurl-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=tinyurl
+      - DB_PASSWORD=tinyurl123
+      - DB_NAME=tinyurl
+      - REDIS_ADDR=redis:6379
+      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+    depends_on:
+      - mysql
+      - redis
+    networks:
+      - tinyurl-network
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: tinyurl
+      MYSQL_USER: tinyurl
+      MYSQL_PASSWORD: tinyurl123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - tinyurl-network
+    command: --default-authentication-plugin=mysql_native_password
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - tinyurl-network
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx负载均衡器
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - tinyurl-app
+    networks:
+      - tinyurl-network
+    restart: unless-stopped
+
+  # Prometheus监控
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - tinyurl-network
+    restart: unless-stopped
+
+  # Grafana可视化
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - tinyurl-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  tinyurl-network:
+    driver: bridge
+
+---
+# Dockerfile
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates curl
+WORKDIR /root/
+COPY --from=builder /app/main .
+EXPOSE 8080
+CMD ["./main"]
+
+---
+# nginx.conf
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream tinyurl_backend {
+        least_conn;
+        server tinyurl-app:8080 max_fails=3 fail_timeout=30s;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # 限制请求频率
+        limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+        limit_req_zone $binary_remote_addr zone=redirect:10m rate=100r/s;
+
+        # 健康检查
+        location /health {
+            proxy_pass http://tinyurl_backend;
+            access_log off;
+        }
+
+        # API接口
+        location /api/ {
+            limit_req zone=api burst=20 nodelay;
+            proxy_pass http://tinyurl_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # CORS头
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE';
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization';
+        }
+
+        # 短链接重定向
+        location ~ ^/[a-zA-Z0-9]{4,8}$ {
+            limit_req zone=redirect burst=50 nodelay;
+            proxy_pass http://tinyurl_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # 静态文件
+        location / {
+            root /usr/share/nginx/html;
+            index index.html;
+        }
+    }
+}
+
+---
+# prometheus.yml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'tinyurl'
+    static_configs:
+      - targets: ['tinyurl-app:8080']
+    metrics_path: '/metrics'
+
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['mysql:3306']
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+---
+# go.mod
+module tinyurl
+
+go 1.21
+
+require (
+    github.com/gin-gonic/gin v1.9.1
+    github.com/go-redis/redis/v8 v8.11.5
+    github.com/go-sql-driver/mysql v1.7.1
+    github.com/golang-jwt/jwt/v4 v4.5.0
+    golang.org/x/time v0.3.0
+)
+
+---
+# init.sql
+CREATE DATABASE IF NOT EXISTS tinyurl;
+USE tinyurl;
+
+CREATE TABLE IF NOT EXISTS url_mapping (
+    short_code VARCHAR(16) PRIMARY KEY,
+    original_url TEXT NOT NULL,
+    user_id VARCHAR(32),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NULL,
+    status TINYINT DEFAULT 1,
+    custom_alias BOOLEAN DEFAULT FALSE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_created_at (created_at),
+    INDEX idx_expires_at (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS url_analytics (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    short_code VARCHAR(16) NOT NULL,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    referer TEXT,
+    country VARCHAR(2),
+    city VARCHAR(50),
+    clicked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_short_code (short_code),
+    INDEX idx_clicked_at (clicked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id VARCHAR(32) PRIMARY KEY,
+    email VARCHAR(100) UNIQUE,
+    password_hash VARCHAR(128),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TINYINT DEFAULT 1,
+    INDEX idx_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建分片表示例（可选）
+CREATE TABLE IF NOT EXISTS url_mapping_0 LIKE url_mapping;
+CREATE TABLE IF NOT EXISTS url_mapping_1 LIKE url_mapping;
+CREATE TABLE IF NOT EXISTS url_mapping_2 LIKE url_mapping;
+CREATE TABLE IF NOT EXISTS url_mapping_3 LIKE url_mapping;
+
+-- 插入测试数据
+INSERT INTO users (user_id, email, password_hash) VALUES 
+('test_user_1', 'user1@example.com', '$2a$10$encrypted_password_hash'),
+('test_user_2', 'user2@example.com', '$2a$10$encrypted_password_hash');
+
+---
+# Makefile
+.PHONY: build run test clean docker-build docker-up docker-down
+
+# 构建项目
+build:
+	go build -o bin/tinyurl main.go
+
+# 运行项目
+run:
+	go run main.go
+
+# 运行测试
+test:
+	go test -v ./...
+
+# 清理构建文件
+clean:
+	rm -rf bin/
+
+# Docker构建
+docker-build:
+	docker build -t tinyurl:latest .
+
+# 启动所有服务
+docker-up:
+	docker-compose up -d
+
+# 停止所有服务
+docker-down:
+	docker-compose down
+
+# 查看日志
+logs:
+	docker-compose logs -f
+
+# 监控服务状态
+status:
+	docker-compose ps
+
+# 数据库迁移
+migrate:
+	docker-compose exec mysql mysql -u tinyurl -ptinyurl123 tinyurl < init.sql
+
+# 备份数据库
+backup:
+	docker-compose exec mysql mysqldump -u tinyurl -ptinyurl123 tinyurl > backup.sql
+
+# 恢复数据库
+restore:
+	docker-compose exec mysql mysql -u tinyurl -ptinyurl123 tinyurl < backup.sql
+
+# 性能测试
+bench:
+	ab -n 10000 -c 100 http://localhost/health
+
+# 压力测试
+stress:
+	wrk -t12 -c400 -d30s http://localhost/health
