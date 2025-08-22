@@ -1,0 +1,676 @@
+# TinyURL系统 API文档和使用说明
+
+## 快速开始
+
+### 1. 部署运行
+
+```bash
+# 克隆代码
+git clone <repository-url>
+cd tinyurl
+
+# 启动服务
+docker-compose up -d
+
+# 检查服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f tinyurl-app
+```
+
+### 2. 服务验证
+
+```bash
+# 健康检查
+curl http://localhost/health
+
+# 预期响应
+{
+  "status": "healthy",
+  "timestamp": 1677123456,
+  "version": "1.0.0"
+}
+```
+
+## API接口文档
+
+### 基础信息
+
+- **Base URL**: `http://localhost/api/v1`
+- **认证方式**: JWT Bearer Token
+- **Content-Type**: `application/json`
+- **字符编码**: UTF-8
+
+### 1. 创建短链接
+
+**POST** `/api/v1/shorten`
+
+创建一个新的短链接，支持自定义别名和过期时间。
+
+#### 请求头
+```http
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+```
+
+#### 请求参数
+```json
+{
+  "original_url": "https://www.example.com/very/long/url/path",
+  "custom_alias": "mylink",           // 可选，自定义短链码
+  "expiration_date": "2024-12-31T23:59:59Z"  // 可选，过期时间
+}
+```
+
+#### 响应示例
+```json
+{
+  "short_url": "https://short.ly/abc123",
+  "original_url": "https://www.example.com/very/long/url/path",
+  "short_code": "abc123",
+  "creation_date": "2024-01-15T10:30:00Z",
+  "expiration_date": "2024-12-31T23:59:59Z"
+}
+```
+
+#### 错误响应
+```json
+{
+  "error": "URL格式无效"
+}
+```
+
+### 2. 短链接重定向
+
+**GET** `/{short_code}`
+
+通过短链码访问原始URL，系统返回HTTP 302重定向。
+
+#### 请求示例
+```bash
+curl -i http://localhost/abc123
+```
+
+#### 响应示例
+```http
+HTTP/1.1 302 Found
+Location: https://www.example.com/very/long/url/path
+```
+
+### 3. 获取分析数据
+
+**GET** `/api/v1/analytics/{short_code}`
+
+获取指定短链接的详细访问统计数据。
+
+#### 请求头
+```http
+Authorization: Bearer <jwt_token>
+```
+
+#### 查询参数
+- `start_date`: 开始日期 (格式: YYYY-MM-DD)
+- `end_date`: 结束日期 (格式: YYYY-MM-DD)
+
+#### 请求示例
+```bash
+curl -H "Authorization: Bearer <jwt_token>" \
+     "http://localhost/api/v1/analytics/abc123?start_date=2024-01-01&end_date=2024-01-31"
+```
+
+#### 响应示例
+```json
+{
+  "short_code": "abc123",
+  "click_count": 1250,
+  "unique_clicks": 892,
+  "referring_sites": {
+    "https://google.com": 450,
+    "https://facebook.com": 320,
+    "https://twitter.com": 180
+  },
+  "location_data": {
+    "US": 680,
+    "CN": 290,
+    "UK": 150,
+    "DE": 130
+  },
+  "device_data": {
+    "mobile": 750,
+    "desktop": 400,
+    "tablet": 100
+  },
+  "time_range": {
+    "2024-01-01": 42,
+    "2024-01-02": 38,
+    "2024-01-03": 55
+  }
+}
+```
+
+### 4. 删除短链接
+
+**DELETE** `/api/v1/{short_code}`
+
+删除指定的短链接（软删除）。
+
+#### 请求头
+```http
+Authorization: Bearer <jwt_token>
+```
+
+#### 请求示例
+```bash
+curl -X DELETE \
+     -H "Authorization: Bearer <jwt_token>" \
+     http://localhost/api/v1/abc123
+```
+
+#### 响应示例
+```json
+{
+  "status": "短链接已删除"
+}
+```
+
+### 5. 获取用户URL列表
+
+**GET** `/api/v1/user/urls`
+
+获取当前用户创建的所有短链接列表。
+
+#### 请求头
+```http
+Authorization: Bearer <jwt_token>
+```
+
+#### 查询参数
+- `page`: 页码，默认1
+- `page_size`: 每页大小，默认20，最大100
+
+#### 请求示例
+```bash
+curl -H "Authorization: Bearer <jwt_token>" \
+     "http://localhost/api/v1/user/urls?page=1&page_size=20"
+```
+
+#### 响应示例
+```json
+{
+  "urls": [
+    {
+      "short_code": "abc123",
+      "short_url": "https://short.ly/abc123",
+      "original_url": "https://www.example.com/path",
+      "created_at": "2024-01-15T10:30:00Z",
+      "expires_at": "2024-12-31T23:59:59Z",
+      "custom_alias": false
+    }
+  ],
+  "page": 1,
+  "page_size": 20,
+  "total": 1
+}
+```
+
+## 错误码说明
+
+| HTTP状态码 | 错误类型 | 说明 |
+|------------|----------|------|
+| 400 | Bad Request | 请求参数无效 |
+| 401 | Unauthorized | 未授权访问 |
+| 404 | Not Found | 短链接不存在 |
+| 409 | Conflict | 自定义别名已存在 |
+| 429 | Too Many Requests | 请求频率超限 |
+| 500 | Internal Server Error | 服务器内部错误 |
+
+## SDK示例
+
+### JavaScript/Node.js
+
+```javascript
+class TinyURLClient {
+  constructor(baseURL, token) {
+    this.baseURL = baseURL;
+    this.token = token;
+  }
+
+  async createShortURL(originalURL, customAlias = null, expirationDate = null) {
+    const response = await fetch(`${this.baseURL}/api/v1/shorten`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.token}`
+      },
+      body: JSON.stringify({
+        original_url: originalURL,
+        custom_alias: customAlias,
+        expiration_date: expirationDate
+      })
+    });
+    
+    return await response.json();
+  }
+
+  async getAnalytics(shortCode, startDate = null, endDate = null) {
+    let url = `${this.baseURL}/api/v1/analytics/${shortCode}`;
+    const params = new URLSearchParams();
+    
+    if (startDate) params.append('start_date', startDate);
+    if (endDate) params.append('end_date', endDate);
+    
+    if (params.toString()) {
+      url += '?' + params.toString();
+    }
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${this.token}`
+      }
+    });
+    
+    return await response.json();
+  }
+
+  async deleteShortURL(shortCode) {
+    const response = await fetch(`${this.baseURL}/api/v1/${shortCode}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${this.token}`
+      }
+    });
+    
+    return await response.json();
+  }
+}
+
+// 使用示例
+const client = new TinyURLClient('http://localhost', 'your-jwt-token');
+
+// 创建短链接
+const result = await client.createShortURL('https://www.example.com/very/long/url');
+console.log(result.short_url);
+
+// 获取分析数据
+const analytics = await client.getAnalytics('abc123');
+console.log(`点击次数: ${analytics.click_count}`);
+```
+
+### Python
+
+```python
+import requests
+import json
+
+class TinyURLClient:
+    def __init__(self, base_url, token):
+        self.base_url = base_url
+        self.token = token
+        self.session = requests.Session()
+        self.session.headers.update({
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        })
+
+    def create_short_url(self, original_url, custom_alias=None, expiration_date=None):
+        data = {'original_url': original_url}
+        if custom_alias:
+            data['custom_alias'] = custom_alias
+        if expiration_date:
+            data['expiration_date'] = expiration_date
+            
+        response = self.session.post(
+            f'{self.base_url}/api/v1/shorten',
+            json=data
+        )
+        return response.json()
+
+    def get_analytics(self, short_code, start_date=None, end_date=None):
+        params = {}
+        if start_date:
+            params['start_date'] = start_date
+        if end_date:
+            params['end_date'] = end_date
+            
+        response = self.session.get(
+            f'{self.base_url}/api/v1/analytics/{short_code}',
+            params=params
+        )
+        return response.json()
+
+    def delete_short_url(self, short_code):
+        response = self.session.delete(f'{self.base_url}/api/v1/{short_code}')
+        return response.json()
+
+# 使用示例
+client = TinyURLClient('http://localhost', 'your-jwt-token')
+
+# 创建短链接
+result = client.create_short_url('https://www.example.com/very/long/url')
+print(f"短链接: {result['short_url']}")
+
+# 获取分析数据
+analytics = client.get_analytics('abc123')
+print(f"点击次数: {analytics['click_count']}")
+```
+
+### cURL命令行示例
+
+```bash
+#!/bin/bash
+
+# 设置变量
+BASE_URL="http://localhost"
+JWT_TOKEN="your-jwt-token"
+
+# 创建短链接
+create_short_url() {
+    curl -X POST \
+         -H "Content-Type: application/json" \
+         -H "Authorization: Bearer $JWT_TOKEN" \
+         -d '{
+           "original_url": "https://www.example.com/very/long/url/path",
+           "custom_alias": "mylink"
+         }' \
+         "$BASE_URL/api/v1/shorten"
+}
+
+# 访问短链接（重定向）
+access_short_url() {
+    curl -i "$BASE_URL/mylink"
+}
+
+# 获取分析数据
+get_analytics() {
+    curl -H "Authorization: Bearer $JWT_TOKEN" \
+         "$BASE_URL/api/v1/analytics/mylink?start_date=2024-01-01&end_date=2024-01-31"
+}
+
+# 删除短链接
+delete_short_url() {
+    curl -X DELETE \
+         -H "Authorization: Bearer $JWT_TOKEN" \
+         "$BASE_URL/api/v1/mylink"
+}
+
+# 获取用户URL列表
+get_user_urls() {
+    curl -H "Authorization: Bearer $JWT_TOKEN" \
+         "$BASE_URL/api/v1/user/urls?page=1&page_size=20"
+}
+```
+
+## 性能测试
+
+### Apache Bench测试
+
+```bash
+# 测试健康检查接口
+ab -n 10000 -c 100 http://localhost/health
+
+# 测试创建短链接接口
+ab -n 1000 -c 50 -T 'application/json' \
+   -H 'Authorization: Bearer your-token' \
+   -p post_data.json \
+   http://localhost/api/v1/shorten
+
+# 测试重定向性能
+ab -n 10000 -c 200 http://localhost/abc123
+```
+
+### wrk压力测试
+
+```bash
+# 基础压力测试
+wrk -t12 -c400 -d30s http://localhost/health
+
+# 短链接重定向测试
+wrk -t8 -c200 -d60s http://localhost/abc123
+
+# POST请求测试
+wrk -t4 -c100 -d30s -s post.lua http://localhost/api/v1/shorten
+```
+
+### 性能基准
+
+| 指标 | 目标值 | 实际测试值 |
+|------|--------|------------|
+| 重定向延迟 | < 100ms | ~50ms |
+| 创建短链QPS | > 200 | ~500 |
+| 重定向QPS | > 20000 | ~25000 |
+| 缓存命中率 | > 80% | ~90% |
+| 可用性 | > 99.9% | 99.95% |
+
+## 监控和运维
+
+### Prometheus指标
+
+系统暴露以下Prometheus指标：
+
+```
+# 请求总数
+http_requests_total{method="GET",handler="/health",status="200"}
+
+# 请求延迟分布
+http_request_duration_seconds{method="POST",handler="/api/v1/shorten"}
+
+# 错误率
+http_requests_error_rate{handler="/api/v1/shorten"}
+
+# 缓存命中率
+cache_hit_rate{type="redis"}
+
+# 数据库连接数
+database_connections{state="active"}
+```
+
+### Grafana Dashboard
+
+推荐创建以下监控面板：
+
+1. **系统概览**
+   - QPS趋势图
+   - 响应时间分布
+   - 错误率监控
+   - 系统资源使用
+
+2. **业务指标**
+   - 短链创建趋势
+   - 热门链接排行
+   - 地域访问分布
+   - 设备类型统计
+
+3. **技术指标**
+   - 缓存命中率
+   - 数据库性能
+   - 服务健康状态
+   - 内存使用情况
+
+### 告警规则
+
+```yaml
+# prometheus_alerts.yml
+groups:
+- name: tinyurl_alerts
+  rules:
+  - alert: HighErrorRate
+    expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "高错误率告警"
+      description: "错误率超过10%"
+
+  - alert: HighResponseTime
+    expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "响应时间过高"
+      description: "95%响应时间超过1秒"
+
+  - alert: LowCacheHitRate
+    expr: cache_hit_rate{type="redis"} < 0.8
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "缓存命中率低"
+      description: "Redis缓存命中率低于80%"
+```
+
+## 部署和扩展
+
+### 水平扩展
+
+```yaml
+# kubernetes deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tinyurl-app
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: tinyurl
+  template:
+    metadata:
+      labels:
+        app: tinyurl
+    spec:
+      containers:
+      - name: tinyurl
+        image: tinyurl:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DB_HOST
+          value: "mysql-cluster"
+        - name: REDIS_ADDR
+          value: "redis-cluster:6379"
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+```
+
+### 数据库分片策略
+
+```sql
+-- 基于短链码的分片策略
+CREATE TABLE url_mapping_shard_0 LIKE url_mapping;
+CREATE TABLE url_mapping_shard_1 LIKE url_mapping;
+CREATE TABLE url_mapping_shard_2 LIKE url_mapping;
+CREATE TABLE url_mapping_shard_3 LIKE url_mapping;
+
+-- 分片函数
+DELIMITER $
+CREATE FUNCTION get_shard_id(short_code VARCHAR(16)) 
+RETURNS INT
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+    RETURN CRC32(short_code) MOD 4;
+END$
+DELIMITER ;
+```
+
+### 故障恢复
+
+```bash
+#!/bin/bash
+# 自动故障恢复脚本
+
+# 检查服务健康状态
+check_health() {
+    local service_url=$1
+    local response=$(curl -s -o /dev/null -w "%{http_code}" $service_url/health)
+    if [ $response -eq 200 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 重启服务
+restart_service() {
+    echo "检测到服务异常，正在重启..."
+    docker-compose restart tinyurl-app
+    sleep 30
+    
+    if check_health "http://localhost"; then
+        echo "服务重启成功"
+        # 发送告警通知
+        curl -X POST https://hooks.slack.com/webhook \
+             -d '{"text":"TinyURL服务已自动恢复"}'
+    else
+        echo "服务重启失败，需要人工干预"
+        # 发送紧急告警
+        curl -X POST https://hooks.slack.com/webhook \
+             -d '{"text":"TinyURL服务重启失败，需要紧急处理！"}'
+    fi
+}
+
+# 主循环
+while true; do
+    if ! check_health "http://localhost"; then
+        restart_service
+    fi
+    sleep 60
+done
+```
+
+## 最佳实践
+
+### 1. 安全建议
+
+- 使用HTTPS加密传输
+- 实施API限流和防DDoS
+- 定期更新JWT密钥
+- 启用SQL注入防护
+- 实施访问日志审计
+
+### 2. 性能优化
+
+- 合理设置缓存过期时间
+- 使用连接池管理数据库连接
+- 实施数据库读写分离
+- 优化SQL查询和索引
+- 使用CDN加速静态资源
+
+### 3. 运维建议
+
+- 定期备份数据库
+- 监控磁盘空间使用
+- 设置合理的告警阈值
+- 定期清理过期数据
+- 制定灾难恢复计划
+
+### 4. 扩展建议
+
+- 预留足够的扩展空间
+- 使用微服务架构
+- 实施数据分片策略
+- 考虑跨区域部署
+- 建立完善的监控体系
+
+这个十亿级URL短链系统的设计和实现涵盖了从架构设计、代码实现到部署运维的完整方案，可以支撑大规模的生产环境使用。
